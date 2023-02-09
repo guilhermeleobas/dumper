@@ -1,8 +1,10 @@
 import hashlib
 import os
 import string
+import sys
 from abc import ABC, abstractclassmethod, abstractmethod
 from collections.abc import Iterable
+from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
@@ -12,6 +14,8 @@ from numba.core.bytecode import ByteCode
 from pyflyby import PythonBlock, find_missing_imports
 from pyflyby._imports2s import fix_unused_and_missing_imports
 
+from line import Line, Comment, Block
+
 
 class Property:
     FUNCTION_NAME = "function_name"
@@ -19,13 +23,21 @@ class Property:
     SIGNATURE = "signature"
 
 
+class StopPipelineIteration(Exception):
+    """
+    """
+
+
 class Pipeline:
-    def __init__(self, *objects) -> None:
-        if not isinstance(objects, Iterable):
-            objects = (objects,)
-        self._objects = tuple(objects)
-        self.properties = {}
-        self.hooks = []
+    def __init__(self, *steps) -> None:
+        if not isinstance(steps, Iterable):
+            steps = (steps,)
+        self._steps = tuple(steps)
+        self.properties: dict[str, Any] = {}
+        self.hooks: list[Hook] = []
+
+    def abort(self):
+        raise StopPipelineIteration()
 
     def set_property(self, key, value, /):
         self.properties[key] = value
@@ -34,41 +46,58 @@ class Pipeline:
     def get_property(self, key, /) -> Any:
         return self.properties.get(key, None)
 
-    def run(self, source: str) -> str:
-        for obj in self._objects:
-            for hook in self.hooks:
-                source = hook.before_each(self, source, obj)
-
-            if issubclass(obj.__class__, AnalysisStep):
-                obj.apply(self, source)
-            else:
-                source = obj.apply(self, source)
-
-            for hook in self.hooks:
-                source = hook.after_each(self, source, obj)
-
+    def run_hook(self, step: 'Step', source: str, method_name: str) -> str:
+        for hook in self.hooks:
+            method = getattr(hook, method_name)
+            source = method(self, source, step)
         return source
 
-    def add_hook(self, hook: Callable) -> None:
-        self.hooks.append(hook)
+    def run_step(self, step: 'Step', source: str) -> str:
+        if issubclass(step.__class__, AnalysisStep):
+            step.apply(self, source)
+        else:
+            source = step.apply(self, source)
+        return source
+
+    def _run(self, source: str) -> None:
+        for step in self._steps:
+            source = self.run_hook(step, source, 'before_each')
+            source = self.run_step(step, source)
+            source = self.run_hook(step, source, 'after_each')
+
+    def run(self, source: str) -> None:
+        try:
+            self._run(source)
+        except StopPipelineIteration:
+            return
+
+    def add_hook(self, hook) -> None:
+        if hook not in self.hooks:
+            self.hooks.append(hook)
 
 
 class Step(ABC):
-    @abstractmethod
-    def apply(self, pipeline: Pipeline, source: str) -> str:
-        pass
+    """
+    Base class for all steps
+    """
 
 
 class TransformationStep(Step):
     """
     A transformation step modifies the source code
     """
+    @abstractmethod
+    def apply(self, pipeline: Pipeline, source: str) -> str:
+        pass
 
 
 class AnalysisStep(Step):
     """
     Analysis step only performs an analysis but keep the source code intact
     """
+    @abstractmethod
+    def apply(self, pipeline: Pipeline, source: str) -> None:
+        pass
 
 
 class Hook(ABC):
@@ -98,27 +127,27 @@ class AddSignature(AnalysisStep):
                 return source
 
             name = pipeline.get_property(Property.FUNCTION_NAME)
-            comment = (
-                f"# This file contains a reproducer for function `{name}`. It consist of all the\n"
-                "# necessary code: imports, globals, Numba types, etc - to reproduce the issue.\n"
-                f"# To execute, uncomment the last line: `{name}.compile(sig)`, and\n"
-                "# replace `sig` by one of the available signatures\n"
-            )
+            comment = Block(
+                Comment(f"This file contains a reproducer for function `{name}`. It consist of all the"),
+                Comment("necessary code: imports, globals, Numba types, etc - to reproduce the issue."),
+                Comment(f"To execute, uncomment the last line: `{name}.compile(sig)`, and"),
+                Comment("replace `sig` by one of the available signatures"),
+            ).resolve()
 
-            imports = (
-                "# imports for signature to be eval\n"
-                "from numba.core import types\n"
-                "from numba.core.types import *\n"
-                "from numba.core.typing import signature\n"
-            )
+            imports = Block(
+                Comment("imports for signature to be eval"),
+                Line("from numba.core import types"),
+                Line("from numba.core.types import *"),
+                Line("from numba.core.typing import signature"),
+            ).resolve()
 
             sig_prop = pipeline.get_property(Property.SIGNATURE)
 
-            sigs_cmd = ""
+            sigs_cmd = Block()
             for idx, sig in enumerate(sig_prop):
                 retty = sig.return_type
                 argtys = ", ".join(map(lambda arg: f"types.{arg!r}", sig.args))
-                sigs_cmd += f'sig{idx} = eval("signature({retty!r}, {argtys})")\n'
+                sigs_cmd += Line(f'sig{idx} = eval("signature({retty!r}, {argtys})")')
 
             signatures = f"{sigs_cmd}" f"# {name}.compile(sig.args)"
 
@@ -135,18 +164,24 @@ class AddSignature(AnalysisStep):
 
     def apply(self, pipeline, source):
         pipeline.add_hook(self.SignatureHook)
-        pipeline.set_property(Property.SIGNATURE, self.signatures)
+
+        set_ = set(self.signatures)
+        sigs = pipeline.get_property(Property.SIGNATURE)
+        if sigs is not None:
+            set_.update(sigs)
+        pipeline.set_property(Property.SIGNATURE, set_)
 
 
 class Compile(AnalysisStep):
-    def apply(self, pipeline: Pipeline, source: str) -> str:
+    def apply(self, pipeline: Pipeline, source: str) -> None:
         code = PythonBlock(source).compile()
         pipeline.set_property(Property.CO_CODE, code)
         pipeline.set_property(Property.FUNCTION_NAME, code.co_names[-1])
 
 
-class FixUnusedGlobals(TransformationStep):
-    """ """
+class FixMissingGlobals(TransformationStep):
+    """
+    """
 
     def __init__(self, globals) -> None:
         self.globals = globals
@@ -174,11 +209,11 @@ class FixUnusedGlobals(TransformationStep):
         return unused_globals
 
     def format(self, unused: dict) -> str:
-        decls = []
+        decls = Block()
         for k, v in unused.items():
             if not (isinstance(v, ModuleType) or callable(v)):
-                decls.append(f"{k} = {v}")
-        return "\n".join(decls)
+                decls += Line(f"{k} = {v}")
+        return decls.resolve()
 
     def apply(self, pipeline, source: str) -> str:
         # TODO: Remove Numba dependency here
@@ -210,7 +245,8 @@ class FixMissingImports(TransformationStep):
             os.environ.update(old_environ)
 
     def apply(self, pipeline, source: str) -> str:
-        """Pyflyby has a tool that find and include missing imports in snippets
+        """
+        Pyflyby has a tool that find and include missing imports in snippets
         of code.
         """
         pyflyby_path = ":".join(map(lambda p: str(p.resolve()), self.dbs)) + ":-"
@@ -269,7 +305,7 @@ class Save(AnalysisStep):
         filepath = self.path / filename
         return filepath
 
-    def apply(self, pipeline: Pipeline, source: str) -> str:
+    def apply(self, pipeline: Pipeline, source: str) -> None:
         filepath = self.compute_filepath(pipeline, source)
         self.save(filepath, source)
 
@@ -281,6 +317,20 @@ class MaybeSave(Save):
         super().__init__(path, ext)
         self.enable = True if config_checker() else False
 
-    def apply(self, pipeline: Pipeline, source: str) -> str:
+    def apply(self, pipeline: Pipeline, source: str) -> None:
         if self.enable:
             return super().apply(pipeline, source)
+
+
+class ConfigChecker(AnalysisStep):
+    """
+    Check config file and abort pipeline execution if needed
+    """
+
+    def config_check(self):
+        # TODO: Implement this method
+        return True
+
+    def apply(self, pipeline: Pipeline, source: str) -> None:
+        if self.config_check() == False:
+            pipeline.abort()

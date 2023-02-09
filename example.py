@@ -4,7 +4,7 @@ import numpy as np
 from numba import njit, types
 from numba.core.typing import signature
 
-from step import (AddSignature, Compile, FixMissingImports, FixUnusedGlobals,
+from step import (AddSignature, Compile, FixMissingImports, FixMissingGlobals,
                   Pipeline, ReplacePlaceholders, Save)
 
 add = """
@@ -25,17 +25,19 @@ def bar(a):
 
 b = 3
 
-source = bar
+source = add
 # ignore return type as it will be computed by Numba
 sig = signature(None, types.int64)
+sig2 = signature(None, types.float64)
 
 pipe = Pipeline(
     ReplacePlaceholders({"decorator": njit, "c": 123}),
     Compile(),
-    FixUnusedGlobals(globals()),
+    FixMissingGlobals(globals()),
     FixMissingImports(),
     AddSignature(sig),
+    AddSignature(sig2),
     Save(Path("./")),
 )
 
-print(pipe.run(source))
+pipe.run(source)
