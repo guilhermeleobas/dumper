@@ -1,20 +1,21 @@
+
+# __all__ = ['Pipeline', 'addSignature', 'Compile', 'FixMissingImports',
+#            'FixMissingGlobals', 'ReplacePlaceholders', 'Save']
+
 import hashlib
 import os
 import string
-import sys
 from abc import ABC, abstractclassmethod, abstractmethod
 from collections.abc import Iterable
-from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
+from .line import Block, Comment, Line
 from numba.core.bytecode import ByteCode
 from pyflyby import PythonBlock, find_missing_imports
 from pyflyby._imports2s import fix_unused_and_missing_imports
-
-from line import Line, Comment, Block
 
 
 class Property:
@@ -288,7 +289,7 @@ class ReplacePlaceholders(TransformationStep):
 class Save(AnalysisStep):
     def __init__(self, path: os.PathLike, ext: str = "py") -> None:
         self.path = path
-        self.ext = "py"
+        self.ext = ext
 
     def compute_hash(self, source):
         return hashlib.sha1(source.encode()).hexdigest()
@@ -308,18 +309,6 @@ class Save(AnalysisStep):
     def apply(self, pipeline: Pipeline, source: str) -> None:
         filepath = self.compute_filepath(pipeline, source)
         self.save(filepath, source)
-
-
-class MaybeSave(Save):
-    def __init__(
-        self, path: os.PathLike, config_checker: Callable, ext: str = "py"
-    ) -> None:
-        super().__init__(path, ext)
-        self.enable = True if config_checker() else False
-
-    def apply(self, pipeline: Pipeline, source: str) -> None:
-        if self.enable:
-            return super().apply(pipeline, source)
 
 
 class ConfigChecker(AnalysisStep):
