@@ -4,14 +4,19 @@ import numpy as np
 from numba import njit, types
 from numba.core.typing import signature
 
-from dumper.step import (AddSignature, Compile, FixMissingImports, FixMissingGlobals,
-                  Pipeline, ReplacePlaceholders, Save)
+from dumper.step import (AddSignature, Compile, Debug, FixMissingGlobalsVariables,
+                         IncludeImports, Pipeline, ReplacePlaceholders, Save)
+
+
+@njit
+def foo(x):
+    return x + x
 
 
 bar = """
 @{decorator}
 def bar(a):
-    return a + np.abs(b) + {c}
+    return a + np.abs(b) + foo({c})
 """
 
 b = 3
@@ -24,11 +29,12 @@ sig2 = signature(None, types.float64)
 pipe = Pipeline(
     ReplacePlaceholders({"decorator": njit, "c": 123}),
     Compile(),
-    FixMissingGlobals(globals()),
-    FixMissingImports(),
+    FixMissingGlobalsVariables(globals()),
+    IncludeImports('import numpy as np', 'from numba import njit'),
     AddSignature(sig),
     AddSignature(sig2),
     Save(Path("./")),
+    Debug(),
 )
 
 pipe.run(source)
