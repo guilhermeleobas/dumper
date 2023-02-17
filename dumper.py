@@ -18,6 +18,8 @@ class Block(Sequence):
         self.args = list(args)
 
     def __str__(self) -> str:
+        if len(self.args) == 0:
+            return ''
         final = "\n".join(map(str, self.args))
         if self.args[-1] == Line.new_line():
             return final.removesuffix("\n")
