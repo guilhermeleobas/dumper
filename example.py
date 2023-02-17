@@ -4,13 +4,13 @@ import numpy as np
 from numba import njit, types
 from numba.core.typing import signature
 
-from dumper.step import (AddSignature, Compile, Debug, FixMissingGlobalsVariables,
-                         IncludeImports, Pipeline, ReplacePlaceholders, Save)
+from step import (AddSignature, Compile, Debug, FixMissingGlobalsVariables,
+                  IncludeImports, Pipeline, ReplacePlaceholders, Save)
 
 
 @njit
 def foo(x):
-    return x + x
+    return len(range(x))
 
 
 bar = """

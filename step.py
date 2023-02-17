@@ -11,8 +11,9 @@ from types import ModuleType
 from typing import Any, Optional
 
 from numba.core.bytecode import ByteCode
+from numba.core.dispatcher import Dispatcher
 
-from .line import Block, Comment, Line
+from line import Block, Comment, Line
 
 
 class Property:
@@ -144,7 +145,10 @@ class FixMissingGlobalsVariables(TransformationStep):
         decls = Block()
         for k, v in unused.items():
             if callable(v):
-                src = inspect.getsource(v.py_func)
+                py_func = v
+                if isinstance(py_func, Dispatcher):
+                    py_func = py_func.py_func
+                src = inspect.getsource(py_func)
                 decls += Block(*map(Line, src.split("\n")))
             elif not isinstance(v, ModuleType):
                 decls += Line(f"{k} = {v}")
