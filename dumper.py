@@ -1,11 +1,13 @@
+import ast
 import hashlib
 import inspect
 import os
+import re
 import string
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from types import ModuleType
-from typing import Any, Optional
+from typing import Any, Callable
 
 from numba.core.bytecode import ByteCode
 from numba.core.dispatcher import Dispatcher
@@ -165,7 +167,7 @@ class Compile(AnalysisStep):
         pipeline.set_property(Property.FUNCTION_NAME, code.co_names[-1])
 
 
-class FixMissingGlobalsVariables(TransformationStep):
+class AddMissingGlobalsVariables(TransformationStep):
     """ """
 
     def __init__(self, globals) -> None:
@@ -196,16 +198,18 @@ class FixMissingGlobalsVariables(TransformationStep):
     def format(self, unused: dict) -> str:
         decls = Block()
         for k, v in unused.items():
-            if callable(v):
-                py_func = v
-                if isinstance(py_func, Dispatcher):
-                    py_func = py_func.py_func
-                try:
-                    src = inspect.getsource(py_func)
-                    decls += Block(*map(Line, src.split("\n")))
-                except TypeError:
-                    pass
-            elif not isinstance(v, ModuleType):
+            # if callable(v):
+            #     py_func = v
+            #     if isinstance(py_func, Dispatcher):
+            #         py_func = py_func.py_func
+            #     try:
+            #         src = inspect.getsource(py_func)
+            #         decls += Block(*map(Line, src.split("\n")))
+            #     except TypeError:
+            #         pass
+            # elif not isinstance(v, ModuleType):
+            #     decls += Line(f"{k} = {v}")
+            if not (isinstance(v, ModuleType) or callable(v)):
                 decls += Line(f"{k} = {v}")
         return decls.to_string()
 
@@ -259,6 +263,121 @@ class ReplacePlaceholders(TransformationStep):
     def apply(self, pipeline: Pipeline, source: str) -> str:
         formatter = self.Formatter(self.placeholders_map)
         return formatter.vformat(source, [], globals())
+
+
+class AddMissingInformation(TransformationStep):
+    class Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.names = set()
+
+        def is_builtin(self, func_name) -> bool:
+            builtins = globals()["__builtins__"]
+            return builtins.get(func_name) is not None
+
+        def visit_Call(self, node: ast.Call) -> Any:
+            if not isinstance(node.func, ast.Name):
+                return
+
+            func_name = node.func.id
+            if self.is_builtin(func_name):
+                return
+
+            self.names.add(func_name)
+
+    def __init__(self, globs: dict[str, Any], ns: dict[str, Any]) -> None:
+        self.ns = ns
+        self.globs = globs
+        self.visited_funcs: dict[str, bool] = dict()
+        self.source_map: dict[str, str] = dict()
+
+    def already_visited(self, func_name):
+        return self.visited_funcs.get(func_name)
+
+    def replace_function_name(self, new_func_name: str, func_str: str) -> None:
+        # Split the function string into lines
+        lines = func_str.split("\n")
+
+        # Find the line that contains the function definition
+        for i, line in enumerate(lines):
+            if line.strip().startswith("def "):
+                # Replace the function name in the function definition line
+                old_func_name = line.split("(")[0][4:]
+                if old_func_name != new_func_name:
+                    new_line = line.replace(old_func_name, new_func_name)
+                    lines[i] = new_line
+                break
+
+        # Join the modified lines and return the new function string
+        new_func_str = "\n".join(lines)
+        return new_func_str
+
+    def add_new_source_function(self, func_name: str, source: str) -> None:
+        assert func_name not in self.source_map
+
+        # if the given func_name does not match the source declaration, one must
+        # replace it before serializing the string to source_map
+        decl = f"def {func_name}"
+        if decl not in source:
+            source = self.replace_function_name(func_name, source)
+        self.visited_funcs[func_name] = True
+        self.source_map[func_name] = source
+
+    def visit_function_w_source(self, func_name: str, source: str) -> set[str]:
+        t = ast.parse(source)
+        v = self.Visitor()
+        v.visit(t)
+        self.add_new_source_function(func_name, source)
+        return v.names
+
+    def visit_function_w_func(self, func_name: str, func: Callable) -> set[str]:
+        py_func = func
+        if isinstance(func, Dispatcher):
+            py_func = func.py_func
+        src = inspect.getsource(py_func)
+        return self.visit_function_w_source(func_name, src)
+
+    def visit_function_w_name(self, func_name: str) -> set[str]:
+        if self.already_visited(func_name):
+            return set()
+
+        func = None
+        if func_name in self.ns:
+            func = self.ns[func_name]
+        elif func_name in self.globs:
+            func = self.globs[func_name]
+        elif func_name in globals():
+            func = globals()[func_name]
+
+        assert func is not None
+        return self.visit_function_w_func(func_name, func)
+
+    def update_funcs_to_be_visited(self, new_funcs: set[str]) -> None:
+        for func_name in new_funcs:
+            if func_name not in self.visited_funcs:
+                self.visited_funcs[func_name] = False
+
+    def apply(self, pipeline: Pipeline, source: str) -> str:
+        func_name = pipeline.get_property(Property.FUNCTION_NAME)
+        new_funcs = self.visit_function_w_source(func_name, source)
+        self.update_funcs_to_be_visited(new_funcs)
+
+        while True:
+            changed = False
+            new_names = set()
+            for func_name, visited in self.visited_funcs.items():
+                if visited:
+                    continue
+
+                changed = True
+                new_names |= self.visit_function_w_name(func_name)
+
+            for name in new_names:
+                if name not in self.visited_funcs:
+                    self.visited_funcs[name] = False
+
+            if changed is False:
+                break
+        return "\n".join(self.source_map.values())
 
 
 class FormatSourceCodeMixin:
@@ -333,9 +452,9 @@ class Save(FormatSourceCodeMixin, AnalysisStep):
         return content
 
     def compute_filepath(self, pipeline, source):
-        fn_name = pipeline.get_property(Property.FUNCTION_NAME)
+        func_name = pipeline.get_property(Property.FUNCTION_NAME)
         hash_ = self.compute_hash(source)
-        filename = f"{fn_name}_{hash_}.{self.ext}"
+        filename = f"{func_name}_{hash_}.{self.ext}"
         filepath = self.path / filename
         return filepath
 
@@ -357,6 +476,11 @@ class ConfigChecker(AnalysisStep):
     def apply(self, pipeline: Pipeline, source: str) -> None:
         if self.config_check() == False:
             pipeline.abort()
+
+
+class Abort(AnalysisStep):
+    def apply(self, pipeline: Pipeline, source: str) -> None:
+        pipeline.abort()
 
 
 class Debug(FormatSourceCodeMixin, AnalysisStep):

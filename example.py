@@ -4,20 +4,40 @@ import numpy as np
 from numba import njit, types
 from numba.core.typing import signature
 
-from dumper import (AddSignature, Compile, Debug, FixMissingGlobalsVariables,
-                    IncludeImports, Pipeline, ReplacePlaceholders, Save)
+from dumper import (AddSignature, Compile, Debug, AddMissingGlobalsVariables,
+                    IncludeImports, Pipeline, ReplacePlaceholders, Save,
+                    AddMissingInformation, Abort)
+
+
+class Config:
+    @classmethod
+    def get_jit_decorator(cls):
+        return njit
+
+
+@njit
+def func(x, y):
+    return x + y
 
 
 @njit
 def foo(x):
-    return len(range(x))
+    return len(range(x)) + func_0(x, 0) + func_1(x, 1) + func_2(x, 2) + abcd(x, 4)
 
 
 bar = """
 @{decorator}
 def bar(a):
-    return a + np.abs(b) + foo({c})
+    return {baz}(a) + np.abs(b) + foo({c})
 """
+
+ns = {
+    'decorator': Config.get_jit_decorator(),
+    'func_0': func,
+    'func_1': func,
+    'func_2': func,
+    'abcd': func,
+}
 
 b = 3
 
@@ -27,9 +47,10 @@ sig = signature(None, types.int64)
 sig2 = signature(None, types.float64)
 
 pipe = Pipeline(
-    ReplacePlaceholders({"decorator": njit, "c": 123}),
+    ReplacePlaceholders({"decorator": Config.get_jit_decorator(), "c": 123, "baz": foo}),
     Compile(),
-    FixMissingGlobalsVariables(globals()),
+    AddMissingInformation(globals(), ns),
+    AddMissingGlobalsVariables(globals()),
     IncludeImports('import numpy as np', 'from numba import njit'),
     AddSignature(sig),
     AddSignature(sig2),
