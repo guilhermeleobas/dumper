@@ -1,7 +1,0 @@
-name: dumper
-channels:
-  - conda-forge
-dependencies:
-  - python
-  - numba
-  - pyflyby

@@ -4,8 +4,8 @@ import numpy as np
 from numba import njit, types
 from numba.core.typing import signature
 
-from step import (AddSignature, Compile, Debug, FixMissingGlobalsVariables,
-                  IncludeImports, Pipeline, ReplacePlaceholders, Save)
+from dumper import (AddSignature, Compile, Debug, FixMissingGlobalsVariables,
+                    IncludeImports, Pipeline, ReplacePlaceholders, Save)
 
 
 @njit
