@@ -200,8 +200,11 @@ class FixMissingGlobalsVariables(TransformationStep):
                 py_func = v
                 if isinstance(py_func, Dispatcher):
                     py_func = py_func.py_func
-                src = inspect.getsource(py_func)
-                decls += Block(*map(Line, src.split("\n")))
+                try:
+                    src = inspect.getsource(py_func)
+                    decls += Block(*map(Line, src.split("\n")))
+                except TypeError:
+                    pass
             elif not isinstance(v, ModuleType):
                 decls += Line(f"{k} = {v}")
         return decls.to_string()
@@ -263,7 +266,7 @@ class FormatSourceCodeMixin:
         name = pipeline.get_property(Property.FUNCTION_NAME)
         signatures = pipeline.get_property(Property.SIGNATURES)
 
-        if len(signatures) == 0:
+        if signatures is None or len(signatures) == 0:
             comments = ""
             imports = ""
             sig_stmts = ""
