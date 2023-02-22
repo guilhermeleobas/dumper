@@ -2,15 +2,14 @@ import ast
 import hashlib
 import inspect
 import os
-import re
 import string
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Iterable, Sequence
-from types import ModuleType
-from typing import Any, Callable
+from types import FunctionType, ModuleType
+from typing import Any, Optional
 
 from numba.core.bytecode import ByteCode
-from numba.core.dispatcher import Dispatcher
 
 
 class Block(Sequence):
@@ -19,7 +18,7 @@ class Block(Sequence):
 
     def __str__(self) -> str:
         if len(self.args) == 0:
-            return ''
+            return ""
         final = "\n".join(map(str, self.args))
         if self.args[-1] == Line.new_line():
             return final.removesuffix("\n")
@@ -200,17 +199,6 @@ class AddMissingGlobalsVariables(TransformationStep):
     def format(self, unused: dict) -> str:
         decls = Block()
         for k, v in unused.items():
-            # if callable(v):
-            #     py_func = v
-            #     if isinstance(py_func, Dispatcher):
-            #         py_func = py_func.py_func
-            #     try:
-            #         src = inspect.getsource(py_func)
-            #         decls += Block(*map(Line, src.split("\n")))
-            #     except TypeError:
-            #         pass
-            # elif not isinstance(v, ModuleType):
-            #     decls += Line(f"{k} = {v}")
             if not (isinstance(v, ModuleType) or callable(v)):
                 decls += Line(f"{k} = {v}")
         return decls.to_string()
@@ -267,7 +255,7 @@ class ReplacePlaceholders(TransformationStep):
         return formatter.vformat(source, [], globals())
 
 
-class AddMissingInformation(TransformationStep):
+class Node:
     class Visitor(ast.NodeVisitor):
         def __init__(self):
             self.names = set()
@@ -286,16 +274,55 @@ class AddMissingInformation(TransformationStep):
 
             self.names.add(func_name)
 
-    def __init__(self, globs: dict[str, Any], ns: dict[str, Any]) -> None:
+    @classmethod
+    def from_function_object(cls, func: FunctionType, parent: Optional["Node"]):
+        func_name = func.__name__
+        mod = inspect.getmodule(func)
+        assert mod is not None, func_name
+        func_str = inspect.getsource(func)
+        self = cls(func_name, func_str, mod, parent)
+        return self
+
+    @classmethod
+    def from_function_name(cls, func_name: str, parent: Optional["Node"]):
+        func = getattr(parent.mod, func_name)
+        mod = inspect.getmodule(func)
+        assert mod is not None, func_name
+        func_str = inspect.getsource(func)
+        self = cls(func_name, func_str, mod, parent)
+        return self
+
+    def __init__(
+        self, func_name: str, func_str: str, mod: ModuleType, parent: Optional["Node"]
+    ):
+        self.func_name: str = func_name
+        self.func_str: str = func_str
+        self.parent: Optional["Node"] = parent
+        self.mod = mod
+
+    def __str__(self) -> str:
+        return f'Node("{self.func_name}")'
+
+    __repr__ = __str__
+
+    def get_called_functions(self) -> set[str]:
+        t = ast.parse(self.func_str)
+        v = self.Visitor()
+        v.visit(t)
+        return v.names
+
+
+class AddMissingInformation(TransformationStep):
+    def __init__(
+        self, globs: dict[str, Any], ns: dict[str, Any], mod: ModuleType
+    ) -> None:
         self.ns = ns
         self.globs = globs
+        self.mod = mod
         self.visited_funcs: dict[str, bool] = dict()
         self.source_map: dict[str, str] = dict()
 
-    def already_visited(self, func_name):
-        return self.visited_funcs.get(func_name)
-
-    def replace_function_name(self, new_func_name: str, func_str: str) -> None:
+    def replace_function_name(self, new_func_name: str, func_str: str) -> str:
         # Split the function string into lines
         lines = func_str.split("\n")
 
@@ -321,64 +348,36 @@ class AddMissingInformation(TransformationStep):
         decl = f"def {func_name}"
         if decl not in source:
             source = self.replace_function_name(func_name, source)
-        self.visited_funcs[func_name] = True
         self.source_map[func_name] = source
-
-    def visit_function_w_source(self, func_name: str, source: str) -> set[str]:
-        t = ast.parse(source)
-        v = self.Visitor()
-        v.visit(t)
-        self.add_new_source_function(func_name, source)
-        return v.names
-
-    def visit_function_w_func(self, func_name: str, func: Callable) -> set[str]:
-        py_func = func
-        if isinstance(func, Dispatcher):
-            py_func = func.py_func
-        src = inspect.getsource(py_func)
-        return self.visit_function_w_source(func_name, src)
-
-    def visit_function_w_name(self, func_name: str) -> set[str]:
-        if self.already_visited(func_name):
-            return set()
-
-        func = None
-        if func_name in self.ns:
-            func = self.ns[func_name]
-        elif func_name in self.globs:
-            func = self.globs[func_name]
-        elif func_name in globals():
-            func = globals()[func_name]
-
-        assert func is not None
-        return self.visit_function_w_func(func_name, func)
-
-    def update_funcs_to_be_visited(self, new_funcs: set[str]) -> None:
-        for func_name in new_funcs:
-            if func_name not in self.visited_funcs:
-                self.visited_funcs[func_name] = False
 
     def apply(self, pipeline: Pipeline, source: str) -> str:
         func_name = pipeline.get_property(Property.FUNCTION_NAME)
-        new_funcs = self.visit_function_w_source(func_name, source)
-        self.update_funcs_to_be_visited(new_funcs)
 
-        while True:
-            changed = False
-            new_names = set()
-            for func_name, visited in self.visited_funcs.items():
-                if visited:
-                    continue
+        self.add_new_source_function(func_name, source)
+        root = Node(func_name, source, self.mod, None)
+        new_funcs = root.get_called_functions()
 
-                changed = True
-                new_names |= self.visit_function_w_name(func_name)
+        v: set[str] = set()
+        q = deque([(name, root) for name in new_funcs])
+
+        while len(q) > 0:
+            func_name, parent = q.popleft()
+
+            if func_name in v:
+                continue
+
+            if func_name in self.ns:
+                obj = self.ns.get(func_name)
+                node = Node.from_function_object(obj, parent)
+            else:
+                node = Node.from_function_name(func_name, parent)
+            self.add_new_source_function(func_name, node.func_str)
+            new_names = node.get_called_functions()
 
             for name in new_names:
-                if name not in self.visited_funcs:
-                    self.visited_funcs[name] = False
+                if name not in v:
+                    q.append((name, node))
 
-            if changed is False:
-                break
         return "\n".join(self.source_map.values())
 
 
