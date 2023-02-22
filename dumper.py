@@ -366,6 +366,8 @@ class AddMissingInformation(TransformationStep):
             if func_name in v:
                 continue
 
+            v.add(func_name)
+
             if func_name in self.ns:
                 obj = self.ns.get(func_name)
                 node = Node.from_function_object(obj, parent)
