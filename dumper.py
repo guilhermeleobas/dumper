@@ -420,7 +420,7 @@ class FormatSourceCodeMixin:
         for idx, sig in enumerate(signatures):
             retty = sig.return_type
             argtys = ", ".join(map(lambda arg: f"types.{arg!r}", sig.args))
-            sigs_cmd += Line(f'sig{idx} = eval("signature({retty!r}, {argtys})")')
+            sigs_cmd += Line(f'sig{idx} = eval("signature({retty!r}, {argtys})", globals(), vars(types))')
 
         sig_stmts = Block(sigs_cmd, Comment(f"{name}.compile(sig.args)")).to_string()
         return comments, imports, sig_stmts

@@ -27,41 +27,35 @@ def func(x, y):
 def foo(x):
     return len(range(x)) + fn_0(x, 0) + fn_1(x, 1) + fn_2(x, 2) + abcd(x, 4)
 
-# @njit
-# def foo(x):
-#     return func_1(x)
-
-bar = """
-@{decorator}
+source = """
+@Config.get_jit_decorator()
 def bar(a):
-    return {baz}(a) + np.abs(b) + foo({c})
+    return foo(a) + np.abs(b) + foo(a)
 """
 
 ns = {
-    'decorator': Config.get_jit_decorator(),
+    # 'decorator': 'Config.get_jit_decorator()',
     'fn_0': func,
     'fn_1': func,
     'fn_2': func,
     'abcd': func,
+    'foo': foo,
+    'np': np,
+    'b': 3,
 }
 
-b = 3
-
-source = bar
 # ignore return type as it will be computed by Numba
 sig = signature(None, types.int64)
 sig2 = signature(None, types.float64)
 
 pipe = Pipeline(
-    ReplacePlaceholders({"decorator": Config.get_jit_decorator(), "c": 123, "baz": foo}),
+    # ReplacePlaceholders({"decorator": Config.get_jit_decorator(), "c": 123, "baz": foo}),
     Compile(),
     AddMissingInformation(globals(), ns, sys.modules[__name__]),
-    AddMissingGlobalsVariables(globals()),
-    IncludeImports('import numpy as np', 'from numba import njit'),
+    AddMissingGlobalsVariables(globals() | ns),
+    IncludeImports('import numpy as np', 'from numba import njit', 'from example import Config'),
     AddSignature(sig),
     AddSignature(sig2),
     Save(Path("./")),
     Debug(),
-)
-
-pipe.run(source)
+).run(source)
